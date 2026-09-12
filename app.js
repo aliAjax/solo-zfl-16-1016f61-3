@@ -1,30 +1,273 @@
 const storageKey = "zfl16-movable-type-workshop";
+const storageVersion = 2;
 
-const starterInventory = [
-  { id: crypto.randomUUID(), char: "山", style: "宋体旧字", size: 30, quantity: 4, wear: "微磨" },
-  { id: crypto.randomUUID(), char: "月", style: "宋体旧字", size: 30, quantity: 3, wear: "旧痕" },
-  { id: crypto.randomUUID(), char: "风", style: "楷体木刻", size: 28, quantity: 2, wear: "微磨" },
-  { id: crypto.randomUUID(), char: "花", style: "楷体木刻", size: 28, quantity: 2, wear: "新" },
-  { id: crypto.randomUUID(), char: "茶", style: "黑体铅字", size: 24, quantity: 3, wear: "旧痕" },
-  { id: crypto.randomUUID(), char: "雨", style: "仿宋细字", size: 22, quantity: 4, wear: "新" }
-];
+const paperSizes = ["postcard", "bookmark", "square"];
+const flowModes = ["horizontal", "vertical"];
+const wearLevels = ["新", "微磨", "旧痕"];
 
-const defaultState = {
-  inventory: starterInventory,
-  selectedTypeId: starterInventory[0].id,
-  placements: [],
-  drafts: [],
-  settings: {
+function createStarterInventory() {
+  return [
+    { id: crypto.randomUUID(), char: "山", style: "宋体旧字", size: 30, quantity: 4, wear: "微磨" },
+    { id: crypto.randomUUID(), char: "月", style: "宋体旧字", size: 30, quantity: 3, wear: "旧痕" },
+    { id: crypto.randomUUID(), char: "风", style: "楷体木刻", size: 28, quantity: 2, wear: "微磨" },
+    { id: crypto.randomUUID(), char: "花", style: "楷体木刻", size: 28, quantity: 2, wear: "新" },
+    { id: crypto.randomUUID(), char: "茶", style: "黑体铅字", size: 24, quantity: 3, wear: "旧痕" },
+    { id: crypto.randomUUID(), char: "雨", style: "仿宋细字", size: 22, quantity: 4, wear: "新" }
+  ];
+}
+
+function defaultSettings() {
+  return {
     paperSize: "postcard",
     flowMode: "horizontal",
     gridGap: 8,
     workTitle: "晚风小笺"
-  }
-};
+  };
+}
 
-let state = loadState();
+function createLayout(name = "版面1") {
+  const inventory = createStarterInventory();
+  return {
+    id: crypto.randomUUID(),
+    name,
+    inventory,
+    selectedTypeId: inventory[0].id,
+    placements: [],
+    drafts: [],
+    settings: defaultSettings()
+  };
+}
+
+function createProject(name = "项目1") {
+  const layout = createLayout("版面1");
+  return {
+    id: crypto.randomUUID(),
+    name,
+    layouts: [layout],
+    activeLayoutId: layout.id
+  };
+}
+
+function createDefaultRoot() {
+  const project = createProject("项目1");
+  return {
+    version: storageVersion,
+    projects: [project],
+    activeProjectId: project.id
+  };
+}
+
+function sanitizeType(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const char = String(raw.char ?? "").trim();
+  const style = String(raw.style ?? "").trim();
+  if (!char || !style) return null;
+  const size = Number(raw.size);
+  const quantity = Number(raw.quantity);
+  return {
+    id: typeof raw.id === "string" && raw.id ? raw.id : crypto.randomUUID(),
+    char,
+    style,
+    size: Number.isFinite(size) ? Math.min(72, Math.max(8, size)) : 24,
+    quantity: Number.isFinite(quantity) ? Math.min(99, Math.max(1, Math.round(quantity))) : 1,
+    wear: wearLevels.includes(raw.wear) ? raw.wear : "新"
+  };
+}
+
+function sanitizePlacements(raw, validTypeIds) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      row: Number(item.row),
+      col: Number(item.col),
+      typeId: String(item.typeId ?? "")
+    }))
+    .filter(
+      (item) =>
+        Number.isInteger(item.row) &&
+        item.row >= 0 &&
+        Number.isInteger(item.col) &&
+        item.col >= 0 &&
+        validTypeIds.has(item.typeId)
+    );
+}
+
+function sanitizeSettings(raw) {
+  const fallback = defaultSettings();
+  if (!raw || typeof raw !== "object") return fallback;
+  const gridGap = Number(raw.gridGap);
+  return {
+    paperSize: paperSizes.includes(raw.paperSize) ? raw.paperSize : fallback.paperSize,
+    flowMode: flowModes.includes(raw.flowMode) ? raw.flowMode : fallback.flowMode,
+    gridGap: Number.isFinite(gridGap) ? Math.min(18, Math.max(4, Math.round(gridGap))) : fallback.gridGap,
+    workTitle: typeof raw.workTitle === "string" ? raw.workTitle : fallback.workTitle
+  };
+}
+
+function sanitizeLayout(raw, fallbackName) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const inventory = Array.isArray(source.inventory)
+    ? source.inventory.map(sanitizeType).filter(Boolean)
+    : createStarterInventory();
+  const validTypeIds = new Set(inventory.map((item) => item.id));
+  const selectedTypeId = validTypeIds.has(source.selectedTypeId)
+    ? source.selectedTypeId
+    : inventory[0]?.id ?? null;
+  const drafts = Array.isArray(source.drafts)
+    ? source.drafts
+        .filter((draft) => draft && typeof draft === "object")
+        .map((draft) => ({
+          id: typeof draft.id === "string" && draft.id ? draft.id : crypto.randomUUID(),
+          title: typeof draft.title === "string" ? draft.title : "未命名作品",
+          settings: sanitizeSettings(draft.settings),
+          placements: sanitizeDraftPlacements(draft.placements),
+          savedAt: typeof draft.savedAt === "string" && !Number.isNaN(Date.parse(draft.savedAt))
+            ? draft.savedAt
+            : new Date(0).toISOString()
+        }))
+    : [];
+  return {
+    id: typeof source.id === "string" && source.id ? source.id : crypto.randomUUID(),
+    name: typeof source.name === "string" && source.name.trim() ? source.name.trim() : fallbackName,
+    inventory,
+    selectedTypeId,
+    placements: sanitizePlacements(source.placements, validTypeIds),
+    drafts,
+    settings: sanitizeSettings(source.settings)
+  };
+}
+
+// 草稿中的落字是历史快照，保留其 typeId（即使字模已从库中删除）
+function sanitizeDraftPlacements(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      row: Number(item.row),
+      col: Number(item.col),
+      typeId: String(item.typeId ?? "")
+    }))
+    .filter(
+      (item) =>
+        Number.isInteger(item.row) && item.row >= 0 &&
+        Number.isInteger(item.col) && item.col >= 0 &&
+        item.typeId
+    );
+}
+
+function sanitizeProject(raw, index) {
+  const fallbackName = `项目${index + 1}`;
+  const source = raw && typeof raw === "object" ? raw : {};
+  const name = typeof source.name === "string" && source.name.trim() ? source.name.trim() : fallbackName;
+  let layouts;
+  if (Array.isArray(source.layouts) && source.layouts.length) {
+    layouts = source.layouts.map((layout, layoutIndex) =>
+      sanitizeLayout(layout, `版面${layoutIndex + 1}`)
+    );
+  } else {
+    layouts = [createLayout("版面1")];
+  }
+  const activeLayoutId = layouts.some((layout) => layout.id === source.activeLayoutId)
+    ? source.activeLayoutId
+    : layouts[0].id;
+  return {
+    id: typeof source.id === "string" && source.id ? source.id : crypto.randomUUID(),
+    name,
+    layouts,
+    activeLayoutId
+  };
+}
+
+function sanitizeRoot(raw) {
+  const source = raw && typeof raw === "object" ? raw : {};
+  const projects = Array.isArray(source.projects)
+    ? source.projects.map((project, index) => sanitizeProject(project, index))
+    : [];
+  const validRoot = projects.length
+    ? { version: storageVersion, projects, activeProjectId: "" }
+    : createDefaultRoot();
+  if (validRoot.projects.length) {
+    validRoot.activeProjectId = validRoot.projects.some(
+      (project) => project.id === source.activeProjectId
+    )
+      ? source.activeProjectId
+      : validRoot.projects[0].id;
+  }
+  return validRoot;
+}
+
+function migrateLegacyState(parsed) {
+  const layout = sanitizeLayout(
+    {
+      name: "默认版面",
+      inventory: parsed.inventory,
+      selectedTypeId: parsed.selectedTypeId,
+      placements: parsed.placements,
+      drafts: parsed.drafts,
+      settings: parsed.settings
+    },
+    "默认版面"
+  );
+  const project = {
+    id: crypto.randomUUID(),
+    name: "项目1",
+    layouts: [layout],
+    activeLayoutId: layout.id
+  };
+  return {
+    version: storageVersion,
+    projects: [project],
+    activeProjectId: project.id
+  };
+}
+
+function loadRoot() {
+  const saved = localStorage.getItem(storageKey);
+  if (!saved) return createDefaultRoot();
+  try {
+    const parsed = JSON.parse(saved);
+    if (parsed && Array.isArray(parsed.projects) && parsed.projects.length) {
+      return sanitizeRoot(parsed);
+    }
+    if (
+      parsed &&
+      (Array.isArray(parsed.inventory) ||
+        Array.isArray(parsed.placements) ||
+        Array.isArray(parsed.drafts) ||
+        (parsed.settings && typeof parsed.settings === "object"))
+    ) {
+      return migrateLegacyState(parsed);
+    }
+    return createDefaultRoot();
+  } catch {
+    return createDefaultRoot();
+  }
+}
+
+const root = loadRoot();
+
+function getActiveProject() {
+  return root.projects.find((project) => project.id === root.activeProjectId) || root.projects[0];
+}
+
+function getActiveLayout() {
+  const project = getActiveProject();
+  return project.layouts.find((layout) => layout.id === project.activeLayoutId) || project.layouts[0];
+}
+
+// state 始终指向当前版面（root 内的嵌套对象），切换版面时重新指向
+let state = getActiveLayout();
 
 const els = {
+  projectSelect: document.querySelector("#projectSelect"),
+  layoutSelect: document.querySelector("#layoutSelect"),
+  newProjectBtn: document.querySelector("#newProjectBtn"),
+  renameProjectBtn: document.querySelector("#renameProjectBtn"),
+  removeProjectBtn: document.querySelector("#removeProjectBtn"),
+  newLayoutBtn: document.querySelector("#newLayoutBtn"),
+  renameLayoutBtn: document.querySelector("#renameLayoutBtn"),
+  removeLayoutBtn: document.querySelector("#removeLayoutBtn"),
   paperSize: document.querySelector("#paperSize"),
   flowMode: document.querySelector("#flowMode"),
   gridGap: document.querySelector("#gridGap"),
@@ -50,23 +293,58 @@ const els = {
   clearBoardBtn: document.querySelector("#clearBoardBtn")
 };
 
-function loadState() {
-  const saved = localStorage.getItem(storageKey);
-  if (!saved) return structuredClone(defaultState);
-  try {
-    const parsed = JSON.parse(saved);
-    return {
-      ...structuredClone(defaultState),
-      ...parsed,
-      settings: { ...defaultState.settings, ...parsed.settings }
-    };
-  } catch {
-    return structuredClone(defaultState);
-  }
+function saveState() {
+  localStorage.setItem(storageKey, JSON.stringify(root));
 }
 
-function saveState() {
-  localStorage.setItem(storageKey, JSON.stringify(state));
+function uniqueName(prefix, existing) {
+  const used = new Set(existing);
+  let n = used.size + 1;
+  while (used.has(`${prefix}${n}`)) n += 1;
+  return `${prefix}${n}`;
+}
+
+function enterContext() {
+  // 切换项目/版面后，搜索与筛选属于临时 UI 状态，随上下文重置
+  els.inventorySearch.value = "";
+  els.styleFilter.value = "all";
+  renderAll();
+}
+
+function renderSwitchers() {
+  const project = getActiveProject();
+  const projectSig = root.projects.map((item) => `${item.id}:${item.name}`).join("|");
+  if (els.projectSelect.dataset.sig !== projectSig) {
+    els.projectSelect.innerHTML = root.projects
+      .map(
+        (item) =>
+          `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`
+      )
+      .join("");
+    els.projectSelect.dataset.sig = projectSig;
+  }
+  els.projectSelect.value = project.id;
+
+  const layoutSig = `${project.id}:${project.layouts
+    .map((item) => `${item.id}:${item.name}`)
+    .join("|")}`;
+  if (els.layoutSelect.dataset.sig !== layoutSig) {
+    els.layoutSelect.innerHTML = project.layouts
+      .map(
+        (item) =>
+          `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`
+      )
+      .join("");
+    els.layoutSelect.dataset.sig = layoutSig;
+  }
+  els.layoutSelect.value = project.activeLayoutId;
+
+  els.removeProjectBtn.disabled = root.projects.length <= 1;
+  els.removeLayoutBtn.disabled = project.layouts.length <= 1;
+  els.removeProjectBtn.title =
+    root.projects.length <= 1 ? "至少保留一个项目" : "移除当前项目";
+  els.removeLayoutBtn.title =
+    project.layouts.length <= 1 ? "每个项目至少保留一个版面" : "移除当前版面";
 }
 
 function getGrid() {
@@ -100,7 +378,9 @@ function renderSettings() {
 
 function renderStyleFilter() {
   const current = els.styleFilter.value || "all";
-  const styles = [...new Set(state.inventory.map((item) => item.style))].sort((a, b) => a.localeCompare(b, "zh-CN"));
+  const styles = [...new Set(state.inventory.map((item) => item.style))].sort((a, b) =>
+    a.localeCompare(b, "zh-CN")
+  );
   els.styleFilter.innerHTML = `<option value="all">全部风格</option>${styles
     .map((style) => `<option value="${escapeHtml(style)}">${escapeHtml(style)}</option>`)
     .join("")}`;
@@ -169,7 +449,9 @@ function renderUsage() {
   els.shortageBadge.className = `badge ${shortages.length ? "warn" : "ok"}`;
 
   const selectedType = getSelectedType();
-  els.selectedTypeLabel.textContent = selectedType ? `当前：${selectedType.char} · ${selectedType.style}` : "未选择字模";
+  els.selectedTypeLabel.textContent = selectedType
+    ? `当前：${selectedType.char} · ${selectedType.style}`
+    : "未选择字模";
 
   els.usageList.innerHTML =
     entries
@@ -206,6 +488,7 @@ function renderDrafts() {
 
 function renderAll() {
   saveState();
+  renderSwitchers();
   renderSettings();
   renderStyleFilter();
   renderInventory();
@@ -308,6 +591,113 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
+
+/* ---------- 项目与版面管理 ---------- */
+
+function newProject() {
+  const suggested = uniqueName("项目", root.projects.map((project) => project.name));
+  const input = prompt("新建项目，输入项目名称：", suggested);
+  if (input === null) return;
+  const name = input.trim() || suggested;
+  const project = createProject(name);
+  root.projects.push(project);
+  root.activeProjectId = project.id;
+  state = project.layouts[0];
+  enterContext();
+}
+
+function renameProject() {
+  const project = getActiveProject();
+  const input = prompt("重命名项目：", project.name);
+  if (input === null) return;
+  const name = input.trim();
+  if (name && name !== project.name) {
+    project.name = name;
+    renderAll();
+  }
+}
+
+function removeProject() {
+  if (root.projects.length <= 1) return;
+  const project = getActiveProject();
+  const confirmed = window.confirm(
+    `确定移除项目「${project.name}」？\n该项目下 ${project.layouts.length} 个版面（含各自的字模库、落字与草稿）将一并删除，且无法恢复。`
+  );
+  if (!confirmed) return;
+  const index = root.projects.findIndex((item) => item.id === project.id);
+  root.projects.splice(index, 1);
+  const next = root.projects[Math.min(index, root.projects.length - 1)];
+  root.activeProjectId = next.id;
+  state = next.layouts.find((layout) => layout.id === next.activeLayoutId) || next.layouts[0];
+  enterContext();
+}
+
+function newLayout() {
+  const project = getActiveProject();
+  const suggested = uniqueName("版面", project.layouts.map((layout) => layout.name));
+  const input = prompt("在当前项目中新建版面，输入版面名称：", suggested);
+  if (input === null) return;
+  const name = input.trim() || suggested;
+  const layout = createLayout(name);
+  project.layouts.push(layout);
+  project.activeLayoutId = layout.id;
+  state = layout;
+  enterContext();
+}
+
+function renameLayout() {
+  const project = getActiveProject();
+  const layout = project.layouts.find((item) => item.id === project.activeLayoutId) || project.layouts[0];
+  const input = prompt("重命名版面：", layout.name);
+  if (input === null) return;
+  const name = input.trim();
+  if (name && name !== layout.name) {
+    layout.name = name;
+    renderAll();
+  }
+}
+
+function removeLayout() {
+  const project = getActiveProject();
+  if (project.layouts.length <= 1) return;
+  const layout = project.layouts.find((item) => item.id === project.activeLayoutId) || project.layouts[0];
+  const confirmed = window.confirm(
+    `确定移除版面「${layout.name}」？\n该版面的字模库、落字与草稿将一并删除，且无法恢复。`
+  );
+  if (!confirmed) return;
+  const index = project.layouts.findIndex((item) => item.id === layout.id);
+  project.layouts.splice(index, 1);
+  const next = project.layouts[Math.min(index, project.layouts.length - 1)];
+  project.activeLayoutId = next.id;
+  state = next;
+  enterContext();
+}
+
+els.newProjectBtn.addEventListener("click", newProject);
+els.renameProjectBtn.addEventListener("click", renameProject);
+els.removeProjectBtn.addEventListener("click", removeProject);
+els.newLayoutBtn.addEventListener("click", newLayout);
+els.renameLayoutBtn.addEventListener("click", renameLayout);
+els.removeLayoutBtn.addEventListener("click", removeLayout);
+
+els.projectSelect.addEventListener("change", () => {
+  const project = root.projects.find((item) => item.id === els.projectSelect.value);
+  if (!project || project.id === root.activeProjectId) return;
+  root.activeProjectId = project.id;
+  state = project.layouts.find((layout) => layout.id === project.activeLayoutId) || project.layouts[0];
+  enterContext();
+});
+
+els.layoutSelect.addEventListener("change", () => {
+  const project = getActiveProject();
+  const layout = project.layouts.find((item) => item.id === els.layoutSelect.value);
+  if (!layout || layout.id === project.activeLayoutId) return;
+  project.activeLayoutId = layout.id;
+  state = layout;
+  enterContext();
+});
+
+/* ---------- 原有版面交互 ---------- */
 
 els.paperSize.addEventListener("change", () => {
   state.settings.paperSize = els.paperSize.value;
