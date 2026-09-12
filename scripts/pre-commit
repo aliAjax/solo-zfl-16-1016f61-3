@@ -1,0 +1,19 @@
+#!/bin/sh
+# 活字排版工坊 —— 提交前检查
+# 由 scripts/install-hooks.js 安装到 .git/hooks/pre-commit（也可手动复制）。
+# 跳过方式：git commit --no-verify
+
+echo "[pre-commit] 语法检查 (npm run check) ..."
+npm run check --silent || {
+  echo "[pre-commit] 语法检查未通过，提交已中止。"
+  exit 1
+}
+
+echo "[pre-commit] 回归测试 (npm test) ..."
+npm test --silent || {
+  echo "[pre-commit] 回归测试未通过，提交已中止。"
+  exit 1
+}
+
+echo "[pre-commit] 全部通过。"
+exit 0

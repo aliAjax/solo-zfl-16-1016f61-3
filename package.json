@@ -1,0 +1,17 @@
+{
+  "name": "movable-type-workshop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "活字排版工坊 —— 纯前端本地活字印章排版工具",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node scripts/serve.js",
+    "test": "node test/regression.js",
+    "check": "node --check app.js && node --check test/regression.js && node --check scripts/serve.js && node --check scripts/install-hooks.js",
+    "install-hooks": "node scripts/install-hooks.js",
+    "prepare": "node scripts/install-hooks.js"
+  },
+  "license": "MIT"
+}

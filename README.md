@@ -2,7 +2,22 @@
 
 一个纯前端本地应用，用来维护字模库、在网格版面中落字、检查字模数量是否超用、保存草稿并导出PNG预览图。
 
-直接打开 `index.html` 即可使用，也可以在本目录启动静态服务访问。
+直接打开 `index.html` 即可使用，也可以在本目录执行 `npm start` 起本地静态服务访问（默认 http://localhost:8000）。
+
+## npm 脚本（Node ≥ 18，零运行时依赖）
+
+| 命令 | 作用 |
+| --- | --- |
+| `npm start` | 启动零依赖本地静态服务（`PORT=3000 npm start` 可改端口，`HOST` 可改监听地址） |
+| `npm test` | 运行回归测试（`test/regression.js`），退出码 0/1 |
+| `npm run check` | 对全部 JS 做 `node --check` 语法检查 |
+| `npm run install-hooks` | 安装 Git 提交前检查钩子 |
+
+`npm install` 时会经 `prepare` 自动安装提交前检查钩子（非 git 环境安静跳过）。
+
+## 提交前检查
+
+`.git/hooks/pre-commit`（源文件 `scripts/pre-commit`）在提交前依次执行 `npm run check` 与 `npm test`，任一不通过即中止提交；需要绕过用 `git commit --no-verify`。
 
 ## 多项目与多版面
 
@@ -15,7 +30,7 @@
 ## 回归测试
 
 ```bash
-node test/regression.js
+npm test          # 等价于 node test/regression.js
 ```
 
 只用 Node 内置模块（在 `vm` 沙箱中桩掉 localStorage、DOM 与弹窗），不依赖浏览器、点击页面或外部服务；通过退出码反映结果（0 通过，1 有失败），可直接放进 CI 或 pre-commit。
