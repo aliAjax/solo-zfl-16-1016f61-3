@@ -77,6 +77,7 @@ function makeElement() {
     dataset: {},
     disabled: false,
     title: "",
+    files: null,
     _listeners: {},
     reset() {},
     addEventListener(type, handler) {
@@ -92,8 +93,33 @@ function makeElement() {
   };
 }
 
+class BlobStub {
+  constructor(parts = []) {
+    this._text = parts.map((part) => String(part)).join("");
+  }
+}
+
+class FileReaderStub {
+  constructor() {
+    this.result = null;
+    this.onload = null;
+    this.onerror = null;
+  }
+  readAsText(file) {
+    Promise.resolve().then(() => {
+      if (file && file.__readError) {
+        if (this.onerror) this.onerror();
+      } else {
+        this.result = file && file.__text != null ? file.__text : "";
+        if (this.onload) this.onload();
+      }
+    });
+  }
+}
+
 function makeDocument() {
   const elements = new Map();
+  const downloads = [];
   const get = (selector) => {
     if (!elements.has(selector)) elements.set(selector, makeElement());
     return elements.get(selector);
@@ -120,9 +146,19 @@ function makeDocument() {
         if (tag === "canvas") {
           return { width: 0, height: 0, getContext: () => ctx2d, toDataURL: () => "data:image/png;base64,AAA=" };
         }
+        if (tag === "a") {
+          return {
+            click() {
+              downloads.push({ href: this.href, download: this.download });
+            },
+            download: "",
+            href: ""
+          };
+        }
         return { click() {}, download: "", href: "" };
       }
-    }
+    },
+    downloads
   };
 }
 
@@ -132,12 +168,13 @@ function makeDocument() {
  * @param {object} dialogs  { prompt: 函数|null, confirm: 函数|null }
  */
 function boot(storage, dialogs = {}) {
-  const { get, document } = makeDocument();
+  const { get, document, downloads } = makeDocument();
   const dialog = {
     promptImpl: typeof dialogs.prompt === "function" ? dialogs.prompt : null,
     confirmImpl: typeof dialogs.confirm === "function" ? dialogs.confirm : null,
     confirmCalls: 0,
-    lastConfirmMessage: null
+    lastConfirmMessage: null,
+    alerts: []
   };
 
   const sandbox = {
@@ -153,15 +190,23 @@ function boot(storage, dialogs = {}) {
     Set,
     Map,
     Promise,
+    setTimeout,
+    clearTimeout,
     structuredClone,
     crypto,
     localStorage: storage,
     document,
+    Blob: BlobStub,
+    URL: { createObjectURL: () => "blob:stub", revokeObjectURL: () => {} },
+    FileReader: FileReaderStub,
     prompt: (message, def) => (dialog.promptImpl ? dialog.promptImpl(message, def) : null),
     confirm: (message) => {
       dialog.confirmCalls += 1;
       dialog.lastConfirmMessage = message;
       return dialog.confirmImpl ? dialog.confirmImpl(message) : false;
+    },
+    alert: (message) => {
+      dialog.alerts.push(String(message));
     }
   };
   sandbox.window = sandbox;
@@ -184,6 +229,11 @@ function boot(storage, dialogs = {}) {
       removeLayout,
       saveDraft,
       exportPreview,
+      exportBackup,
+      buildBackup,
+      importBackupText,
+      applyBackup,
+      handleImportFile,
       renderAll
     };
   `;
@@ -201,7 +251,15 @@ function boot(storage, dialogs = {}) {
     node.value = id;
     node.fire("change");
   };
-  return { api, el, dialog, selectProject, selectLayout, storage };
+  // 模拟用户通过文件输入选择文件并等待 FileReader 的异步 onload
+  const chooseBackupFile = async (file) => {
+    const input = el("#backupFileInput");
+    input.files = file ? [file] : null;
+    input.fire("change");
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+  return { api, el, dialog, selectProject, selectLayout, storage, downloads, chooseBackupFile };
 }
 
 /* ------------------------------------------------------------------ */
@@ -767,15 +825,250 @@ section("移除与草稿：删除范围准确，不波及其他项目/版面");
 }
 
 /* ------------------------------------------------------------------ */
-/* 汇总                                                                 */
+/* 10. 备份导出                                                          */
 /* ------------------------------------------------------------------ */
 
-console.log(`\n========================================`);
-if (failed === 0) {
-  console.log(`回归测试全部通过：${passed} 项断言`);
-  process.exit(0);
-} else {
-  console.log(`${failed} 项失败，${passed} 项通过：`);
-  for (const message of failures) console.log(`  - ${message}`);
-  process.exit(1);
+section("备份导出：全量项目数据打包为 JSON 文件");
+{
+  const env = boot(makeStorage(), { prompt: () => "项目二" });
+  const { api, el } = env;
+
+  // 造数据：2 个项目，项目1 有 2 个版面，含字模/落字/草稿/非默认设置
+  addType(api, el, { char: "竹", style: "手写体" });
+  api.getState().selectedTypeId = api.getState().inventory.find((t) => t.char === "竹").id;
+  api.placeType(0, 0);
+  setSetting(el, "#workTitle", "导出版标题");
+  el("#workTitle").fire("input");
+  setSetting(el, "#paperSize", "bookmark");
+  api.saveDraft();
+  env.dialog.promptImpl = () => "第二版面";
+  api.newLayout();
+  api.placeType(2, 2);
+  env.dialog.promptImpl = () => "项目二";
+  api.newProject();
+
+  const backup = api.buildBackup();
+  eq(backup.kind, "movable-type-workshop-backup", "备份带类型标记 kind");
+  eq(backup.version, 2, "备份带结构版本号");
+  ok(typeof backup.exportedAt === "string" && !Number.isNaN(Date.parse(backup.exportedAt)), "备份带导出时间");
+  eq(backup.root.projects.length, 2, "备份包含全部 2 个项目");
+  eq(backup.root.projects[0].layouts.length, 2, "备份包含项目1 的 2 个版面");
+  const exportedLayout = backup.root.projects[0].layouts[0];
+  ok(exportedLayout.inventory.some((t) => t.char === "竹"), "备份包含自定义字模");
+  eq(exportedLayout.placements.length, 1, "备份包含落字");
+  eq(exportedLayout.drafts.length, 1, "备份包含草稿");
+  eq(exportedLayout.settings.workTitle, "导出版标题", "备份包含作品名设置");
+  eq(exportedLayout.settings.paperSize, "bookmark", "备份包含纸张设置");
+  eq(backup.root.activeProjectId, api.getRoot().projects[1].id, "备份记录当前活动项目");
+
+  // 备份必须是深拷贝，不能与活数据共享任何数组/对象引用
+  ok(backup.root !== api.getRoot(), "备份 root 是独立对象");
+  ok(backup.root.projects !== api.getRoot().projects, "备份的项目数组不共享引用");
+  const liveLayout = api.getRoot().projects[0].layouts[0];
+  const backupLayout = backup.root.projects[0].layouts[0];
+  ok(backupLayout.inventory !== liveLayout.inventory, "备份的字模库数组不共享引用");
+  ok(backupLayout.placements !== liveLayout.placements, "备份的落字数组不共享引用");
+  ok(backupLayout.drafts !== liveLayout.drafts, "备份的草稿数组不共享引用");
+  ok(backupLayout.settings !== liveLayout.settings, "备份的设置对象不共享引用");
+
+  // 备份是深拷贝：之后继续操作不会污染已生成的备份
+  const backupJson = JSON.stringify(backup);
+  api.getRoot().projects[0].layouts[0].placements.push({ row: 9, col: 9, typeId: "x" });
+  const backup2 = api.buildBackup();
+  ok(!backupJson.includes('"row":9'), "先前生成的备份保持当时快照（不含之后新增的落字）");
+  ok(JSON.stringify(backup2.root.projects[0].layouts[0].placements).includes('"row":9'), "重新导出反映最新数据");
+
+  // exportBackup 真正触发文件下载，文件名含 .json
+  el("#exportBackupBtn").click();
+  eq(env.downloads.length, 1, "点击导出产生一次下载");
+  ok(/\.json$/i.test(env.downloads[0].download), "下载文件名以 .json 结尾");
+  ok(/备份/.test(env.downloads[0].download), "下载文件名包含「备份」");
+  eq(env.downloads[0].href, "blob:stub", "下载指向生成的 Blob URL");
+
+  // 点击「导入备份」会先清空文件输入，使同一文件可被重复选择
+  el("#backupFileInput").value = "C:\\fakepath\\old.json";
+  el("#importBackupBtn").click();
+  eq(el("#backupFileInput").value, "", "打开选择框前清空旧的文件选择（支持重复导入同一文件）");
 }
+
+/* ------------------------------------------------------------------ */
+/* 11. 备份导入（恢复）—— 异步 UI 流程                                    */
+/* ------------------------------------------------------------------ */
+
+async function runImportTests() {
+  section("备份导入：确认后覆盖，取消不动数据，刷新一致");
+  {
+    // 源环境：构造一份含 2 个项目的备份文本
+    const sourceEnv = boot(makeStorage(), { prompt: () => "项目二" });
+    {
+      const { api, el } = sourceEnv;
+      addType(api, el, { char: "墨", style: "金文体" });
+      api.getState().selectedTypeId = api.getState().inventory.find((t) => t.char === "墨").id;
+      api.placeType(4, 4);
+      setSetting(el, "#workTitle", "恢复后的标题");
+      el("#workTitle").fire("input");
+      api.saveDraft();
+      sourceEnv.dialog.promptImpl = () => "项目二";
+      api.newProject();
+    }
+    const backupText = JSON.stringify(sourceEnv.api.buildBackup());
+
+    // 目标环境：默认 1 个项目，先做一些「将被覆盖」的数据
+    const storage = makeStorage();
+    let env = boot(storage, { confirm: () => false });
+    {
+      const { api, el } = env;
+      addType(api, el, { char: "旧", style: "旧风格" });
+      api.placeType(1, 1);
+      const before = snapshot(api.getRoot());
+
+      // 11.1 确认框点取消：数据原封不动，不弹成功提示
+      await env.chooseBackupFile({ name: "backup.json", __text: backupText });
+      eq(env.dialog.confirmCalls, 1, "导入前弹出确认框");
+      ok(/覆盖/.test(env.dialog.lastConfirmMessage || ""), "确认文案明确提示会覆盖当前数据");
+      ok(/2 个项目/.test(env.dialog.lastConfirmMessage || ""), "确认文案列出备份中的项目数");
+      eq(env.dialog.alerts.length, 0, "取消后不弹结果提示");
+      eq(JSON.stringify(snapshot(api.getRoot())), JSON.stringify(before), "取消导入：当前数据完全不变");
+      const persisted = persistCount(storage);
+      eq(persisted.projects.length, 1, "取消导入：存储未被改写");
+      ok(persisted.projects[0].layouts[0].inventory.some((t) => t.char === "旧"), "取消导入：旧字模仍在");
+
+      // 11.2 确认导入：全量覆盖
+      env.dialog.confirmImpl = () => true;
+      await env.chooseBackupFile({ name: "backup.json", __text: backupText });
+      // 导入即持久化：在用户做任何后续切换之前，存储就必须已是备份内容
+      const immediatePersist = persistCount(storage);
+      eq(immediatePersist.projects.length, 2, "导入完成瞬间结果已写入本地存储（无需额外操作）");
+      const root = api.getRoot();
+      eq(root.projects.length, 2, "确认导入：项目被覆盖为备份的 2 个");
+      eq(api.getActiveProject().name, "项目二", "确认导入：停留在备份记录的活动项目");
+      env.selectProject(root.projects[0].id);
+      ok(api.getState().inventory.some((t) => t.char === "墨"), "确认导入：备份字模已恢复");
+      ok(!api.getState().inventory.some((t) => t.char === "旧"), "确认导入：原有旧字模被覆盖清除");
+      eq(api.getState().placements.length, 1, "确认导入：落字恢复");
+      eq(api.getState().drafts.length, 1, "确认导入：草稿恢复");
+      eq(api.getState().settings.workTitle, "恢复后的标题", "确认导入：设置恢复");
+      ok(/导入成功/.test(env.dialog.alerts.join("")), "导入成功有明确提示");
+
+      // 导入即持久化（不依赖再次操作）
+      const afterPersist = persistCount(storage);
+      eq(afterPersist.projects.length, 2, "导入结果已写入本地存储");
+    }
+
+    // 11.3 刷新后与导入结果完全一致
+    env = boot(storage);
+    {
+      const { api } = env;
+      eq(api.getRoot().projects.length, 2, "刷新后 2 个项目仍在");
+      const p1 = api.getRoot().projects[0];
+      env.selectProject(p1.id);
+      ok(api.getState().inventory.some((t) => t.char === "墨"), "刷新后恢复的字模在");
+      eq(api.getState().placements.length, 1, "刷新后恢复的落字在");
+      eq(api.getState().drafts.length, 1, "刷新后恢复的草稿在");
+      eq(api.getState().settings.workTitle, "恢复后的标题", "刷新后恢复的设置在");
+
+      // 11.4 导入后原有项目/版面操作继续可用
+      env.dialog.promptImpl = () => "恢复后新版面";
+      api.newLayout();
+      eq(api.getActiveProject().layouts.length, 2, "导入后仍可新建版面");
+      api.getState().selectedTypeId = api.getState().inventory[0].id;
+      api.placeType(0, 0);
+      eq(api.getState().placements.length, 1, "导入后的新版面可正常落字");
+      api.saveDraft();
+      eq(api.getState().drafts.length, 1, "导入后的新版面可正常存草稿");
+
+      env.dialog.confirmImpl = () => false;
+      const projectsBeforeRemove = api.getRoot().projects.length;
+      env.selectProject(api.getRoot().projects[1].id);
+      api.removeProject();
+      eq(api.getRoot().projects.length, projectsBeforeRemove, "导入后的项目移除仍受确认框保护");
+      env.selectProject(p1.id);
+      env.dialog.promptImpl = () => "恢复后改名";
+      api.renameProject();
+      eq(api.getActiveProject().name, "恢复后改名", "导入后可重命名项目");
+    }
+  }
+
+  section("备份导入：损坏/错误文件给出明确提示且不动数据");
+  {
+    const badCases = [
+      { label: "不是 JSON 文本", file: { __text: "我不是JSON{" }, expect: /合法的 JSON/ },
+      { label: "JSON 但类型不符", file: { __text: JSON.stringify({ kind: "some-other-backup", root: {} }) }, expect: /不是活字排版工坊的备份/ },
+      { label: "空对象", file: { __text: JSON.stringify({}) }, expect: /没有任何项目/ },
+      { label: "projects 不是数组", file: { __text: JSON.stringify({ projects: "x" }) }, expect: /没有任何项目/ },
+      { label: "项目里没有版面", file: { __text: JSON.stringify({ projects: [{ id: "p", name: "P", layouts: [] }] }) }, expect: /没有任何版面/ },
+      { label: "版面缺字模库", file: { __text: JSON.stringify({ projects: [{ id: "p", name: "P", layouts: [{ id: "l", name: "L", placements: [], drafts: [], settings: {} }] }] }) }, expect: /字模库/ },
+      { label: "版面缺落字", file: { __text: JSON.stringify({ projects: [{ id: "p", name: "P", layouts: [{ id: "l", name: "L", inventory: [], drafts: [], settings: {} }] }] }) }, expect: /落字/ },
+      { label: "版面缺草稿", file: { __text: JSON.stringify({ projects: [{ id: "p", name: "P", layouts: [{ id: "l", name: "L", inventory: [], placements: [], settings: {} }] }] }) }, expect: /草稿/ },
+      { label: "版面缺设置", file: { __text: JSON.stringify({ projects: [{ id: "p", name: "P", layouts: [{ id: "l", name: "L", inventory: [], placements: [], drafts: [] }] }] }) }, expect: /设置/ }
+    ];
+
+    for (const bad of badCases) {
+      const env = boot(makeStorage(), { confirm: () => true });
+      addType(env.api, env.el, { char: "原有字", style: "原有风格" });
+      env.api.placeType(0, 0);
+      const before = snapshot(env.api.getRoot());
+
+      await env.chooseBackupFile({ name: "bad.json", ...bad.file });
+      const joinedAlerts = env.dialog.alerts.join("");
+      ok(/导入失败/.test(joinedAlerts), `[${bad.label}] 有「导入失败」提示`);
+      ok(bad.expect.test(joinedAlerts), `[${bad.label}] 提示原因符合预期（${bad.expect}）`);
+      ok(/未被改动/.test(joinedAlerts), `[${bad.label}] 提示当前数据未被改动`);
+      eq(env.dialog.confirmCalls, 0, `[${bad.label}] 文件不合法时不弹覆盖确认框`);
+      eq(JSON.stringify(snapshot(env.api.getRoot())), JSON.stringify(before), `[${bad.label}] 当前数据保持不变`);
+      eq(persistCount(env.storage).projects[0].layouts[0].inventory.length, before.projects[0].layouts[0].inventory.length, `[${bad.label}] 存储未被改写`);
+    }
+
+    // 同步入口的返回结构同样明确
+    {
+      const env = boot(makeStorage());
+      const r1 = env.api.importBackupText("{bad");
+      ok(r1.error && !r1.root, "importBackupText 对坏 JSON 返回 error 而非抛异常");
+      const r2 = env.api.importBackupText(JSON.stringify({ projects: [] }));
+      ok(/没有任何项目/.test(r2.error || ""), "空项目数组被判为损坏");
+    }
+
+    // 文件读取失败（如权限问题）
+    {
+      const env = boot(makeStorage(), { confirm: () => true });
+      const before = snapshot(env.api.getRoot());
+      await env.chooseBackupFile({ name: "x.json", __text: "", __readError: true });
+      ok(/无法读取/.test(env.dialog.alerts.join("")), "文件读取失败有明确提示");
+      eq(env.dialog.confirmCalls, 0, "读取失败不弹覆盖确认框");
+      eq(JSON.stringify(snapshot(env.api.getRoot())), JSON.stringify(before), "读取失败不动数据");
+    }
+
+    // 空选择（未选文件直接触发 change）安全返回
+    {
+      const env = boot(makeStorage());
+      let threw = false;
+      try {
+        await env.chooseBackupFile(null);
+      } catch {
+        threw = true;
+      }
+      ok(!threw, "未选择文件时不报错");
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* 汇总（等待异步导入测试完成后再输出）                                    */
+/* ------------------------------------------------------------------ */
+
+function finish() {
+  console.log(`\n========================================`);
+  if (failed === 0) {
+    console.log(`回归测试全部通过：${passed} 项断言`);
+    process.exit(0);
+  } else {
+    console.log(`${failed} 项失败，${passed} 项通过：`);
+    for (const message of failures) console.log(`  - ${message}`);
+    process.exit(1);
+  }
+}
+
+runImportTests().then(finish).catch((error) => {
+  console.error("\n测试运行器异常：", error);
+  process.exit(1);
+});

@@ -290,7 +290,10 @@ const els = {
   inventoryCount: document.querySelector("#inventoryCount"),
   saveDraftBtn: document.querySelector("#saveDraftBtn"),
   exportBtn: document.querySelector("#exportBtn"),
-  clearBoardBtn: document.querySelector("#clearBoardBtn")
+  clearBoardBtn: document.querySelector("#clearBoardBtn"),
+  exportBackupBtn: document.querySelector("#exportBackupBtn"),
+  importBackupBtn: document.querySelector("#importBackupBtn"),
+  backupFileInput: document.querySelector("#backupFileInput")
 };
 
 function saveState() {
@@ -673,12 +676,142 @@ function removeLayout() {
   enterContext();
 }
 
+/* ---------- 备份导出 / 导入恢复 ---------- */
+
+const BACKUP_KIND = "movable-type-workshop-backup";
+
+function summarizeRoot(source) {
+  const layouts = source.projects.reduce((sum, project) => sum + project.layouts.length, 0);
+  const typeCount = source.projects.reduce(
+    (sum, project) => sum + project.layouts.reduce((n, layout) => n + layout.inventory.length, 0),
+    0
+  );
+  return `${source.projects.length} 个项目、${layouts} 个版面、${typeCount} 枚字模`;
+}
+
+function buildBackup() {
+  return {
+    kind: BACKUP_KIND,
+    version: storageVersion,
+    exportedAt: new Date().toISOString(),
+    root: structuredClone({
+      version: storageVersion,
+      projects: root.projects,
+      activeProjectId: root.activeProjectId
+    })
+  };
+}
+
+function exportBackup() {
+  const json = JSON.stringify(buildBackup(), null, 2);
+  const stamp = new Date().toISOString().slice(0, 19).replaceAll(":", "").replace("T", "-");
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `活字排版工坊-备份-${stamp}.json`;
+  link.click();
+  // 延迟回收，避免下载尚未开始就释放 Blob
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// 对备份做严格结构校验：字段缺失或类型不对都算损坏文件，拒绝导入
+function validateBackupShape(source) {
+  if (!source || typeof source !== "object") return "文件内容不是有效的 JSON 对象。";
+  if (source.kind !== undefined && source.kind !== BACKUP_KIND) {
+    return "文件不是活字排版工坊的备份（类型标记不匹配）。";
+  }
+  const data = source.root && typeof source.root === "object" ? source.root : source;
+  if (!Array.isArray(data.projects) || data.projects.length === 0) {
+    return "备份中没有任何项目。";
+  }
+  for (const [projectIndex, project] of data.projects.entries()) {
+    if (!project || typeof project !== "object") return `第 ${projectIndex + 1} 个项目数据损坏。`;
+    if (!Array.isArray(project.layouts) || project.layouts.length === 0) {
+      return `项目「${project.name || projectIndex + 1}」中没有任何版面。`;
+    }
+    for (const [layoutIndex, layout] of project.layouts.entries()) {
+      if (!layout || typeof layout !== "object") {
+        return `项目「${project.name || projectIndex + 1}」的第 ${layoutIndex + 1} 个版面数据损坏。`;
+      }
+      if (!Array.isArray(layout.inventory)) {
+        return `版面「${layout.name || layoutIndex + 1}」缺少字模库数据。`;
+      }
+      if (!Array.isArray(layout.placements)) {
+        return `版面「${layout.name || layoutIndex + 1}」缺少落字数据。`;
+      }
+      if (!Array.isArray(layout.drafts)) {
+        return `版面「${layout.name || layoutIndex + 1}」缺少草稿数据。`;
+      }
+      if (!layout.settings || typeof layout.settings !== "object") {
+        return `版面「${layout.name || layoutIndex + 1}」缺少设置数据。`;
+      }
+    }
+  }
+  return null;
+}
+
+// 解析并校验备份文本；成功返回可用的 root，失败返回 { error }
+function importBackupText(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { error: "文件不是合法的 JSON，无法导入。" };
+  }
+  const shapeError = validateBackupShape(parsed);
+  if (shapeError) return { error: shapeError };
+  const data = parsed.root && typeof parsed.root === "object" ? parsed.root : parsed;
+  const clean = sanitizeRoot(data);
+  if (!clean.projects.length) return { error: "备份清洗后没有可用项目，已取消导入。" };
+  return { root: clean };
+}
+
+// 实际应用备份：覆盖全部当前数据，切到备份的活动项目/版面
+function applyBackup(cleanRoot) {
+  root.projects = cleanRoot.projects;
+  root.activeProjectId = cleanRoot.activeProjectId;
+  const project = getActiveProject();
+  state = project.layouts.find((layout) => layout.id === project.activeLayoutId) || project.layouts[0];
+  enterContext();
+}
+
+function handleImportFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const result = importBackupText(String(reader.result || ""));
+    if (result.error) {
+      window.alert(`导入失败：${result.error}\n当前数据未被改动。`);
+      return;
+    }
+    const confirmed = window.confirm(
+      `即将导入备份（${summarizeRoot(result.root)}）。\n导入会覆盖当前全部项目、版面、字模、落字、草稿与设置，此操作无法撤销。\n确定继续吗？`
+    );
+    if (!confirmed) return;
+    applyBackup(result.root);
+    window.alert(`导入成功：已恢复为 ${summarizeRoot(result.root)}。`);
+  };
+  reader.onerror = () => {
+    window.alert("导入失败：文件无法读取，当前数据未被改动。");
+  };
+  reader.readAsText(file);
+}
+
 els.newProjectBtn.addEventListener("click", newProject);
 els.renameProjectBtn.addEventListener("click", renameProject);
 els.removeProjectBtn.addEventListener("click", removeProject);
 els.newLayoutBtn.addEventListener("click", newLayout);
 els.renameLayoutBtn.addEventListener("click", renameLayout);
 els.removeLayoutBtn.addEventListener("click", removeLayout);
+els.exportBackupBtn.addEventListener("click", exportBackup);
+els.importBackupBtn.addEventListener("click", () => {
+  els.backupFileInput.value = ""; // 允许重复选择同一个文件
+  els.backupFileInput.click();
+});
+els.backupFileInput.addEventListener("change", () => {
+  handleImportFile(els.backupFileInput.files && els.backupFileInput.files[0]);
+});
 
 els.projectSelect.addEventListener("change", () => {
   const project = root.projects.find((item) => item.id === els.projectSelect.value);
