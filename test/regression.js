@@ -1000,7 +1000,44 @@ async function runImportTests() {
       { label: "版面缺字模库", file: { __text: JSON.stringify({ projects: [{ id: "p", name: "P", layouts: [{ id: "l", name: "L", placements: [], drafts: [], settings: {} }] }] }) }, expect: /字模库/ },
       { label: "版面缺落字", file: { __text: JSON.stringify({ projects: [{ id: "p", name: "P", layouts: [{ id: "l", name: "L", inventory: [], drafts: [], settings: {} }] }] }) }, expect: /落字/ },
       { label: "版面缺草稿", file: { __text: JSON.stringify({ projects: [{ id: "p", name: "P", layouts: [{ id: "l", name: "L", inventory: [], placements: [], settings: {} }] }] }) }, expect: /草稿/ },
-      { label: "版面缺设置", file: { __text: JSON.stringify({ projects: [{ id: "p", name: "P", layouts: [{ id: "l", name: "L", inventory: [], placements: [], drafts: [] }] }] }) }, expect: /设置/ }
+      { label: "版面缺设置", file: { __text: JSON.stringify({ projects: [{ id: "p", name: "P", layouts: [{ id: "l", name: "L", inventory: [], placements: [], drafts: [] }] }] }) }, expect: /设置/ },
+      {
+        label: "项目 id 重复",
+        file: {
+          __text: JSON.stringify({
+            kind: "movable-type-workshop-backup",
+            root: {
+              projects: [
+                { id: "dupP", name: "甲项目", activeLayoutId: "l1", layouts: [{ id: "l1", name: "版面1", inventory: [], placements: [], drafts: [], settings: {} }] },
+                { id: "dupP", name: "乙项目", activeLayoutId: "l2", layouts: [{ id: "l2", name: "版面2", inventory: [], placements: [], drafts: [], settings: {} }] }
+              ]
+            }
+          })
+        },
+        expect: /重复的项目 id「dupP」.*甲项目.*乙项目/
+      },
+      {
+        label: "版面 id 重复（同一项目内）",
+        file: {
+          __text: JSON.stringify({
+            kind: "movable-type-workshop-backup",
+            root: {
+              projects: [
+                {
+                  id: "p1",
+                  name: "诗集",
+                  activeLayoutId: "dupL",
+                  layouts: [
+                    { id: "dupL", name: "春卷", inventory: [], placements: [], drafts: [], settings: {} },
+                    { id: "dupL", name: "秋卷", inventory: [], placements: [], drafts: [], settings: {} }
+                  ]
+                }
+              ]
+            }
+          })
+        },
+        expect: /重复的版面 id「dupL」.*春卷.*秋卷/
+      }
     ];
 
     for (const bad of badCases) {
@@ -1019,6 +1056,45 @@ async function runImportTests() {
       eq(persistCount(env.storage).projects[0].layouts[0].inventory.length, before.projects[0].layouts[0].inventory.length, `[${bad.label}] 存储未被改写`);
     }
 
+    // 跨项目版面 id 相同是合法的（版面 id 只要求项目内唯一），必须正常恢复
+    {
+      const crossProjectText = JSON.stringify({
+        kind: "movable-type-workshop-backup",
+        root: {
+          projects: [
+            {
+              id: "pa",
+              name: "项目甲",
+              activeLayoutId: "sharedL",
+              layouts: [
+                { id: "sharedL", name: "同号版面", inventory: [], placements: [], drafts: [], settings: { workTitle: "甲的同号" } }
+              ]
+            },
+            {
+              id: "pb",
+              name: "项目乙",
+              activeLayoutId: "sharedL",
+              layouts: [
+                { id: "sharedL", name: "同号版面", inventory: [], placements: [], drafts: [], settings: { workTitle: "乙的同号" } }
+              ]
+            }
+          ],
+          activeProjectId: "pa"
+        }
+      });
+      const storage = makeStorage();
+      const env = boot(storage, { confirm: () => true });
+      await env.chooseBackupFile({ name: "ok.json", __text: crossProjectText });
+      eq(env.api.getRoot().projects.length, 2, "跨项目版面同 id：导入成功，2 个项目都在");
+      // 两个项目都能被独立切换命中（这正是项目 id 去重要保护的可达性）
+      env.selectProject("pa");
+      eq(env.api.getActiveProject().name, "项目甲", "跨项目同版面 id：可切到项目甲");
+      eq(env.api.getState().settings.workTitle, "甲的同号", "项目甲命中自己的版面");
+      env.selectProject("pb");
+      eq(env.api.getActiveProject().name, "项目乙", "跨项目同版面 id：可切到项目乙");
+      eq(env.api.getState().settings.workTitle, "乙的同号", "项目乙命中自己的版面（不被甲遮蔽）");
+    }
+
     // 同步入口的返回结构同样明确
     {
       const env = boot(makeStorage());
@@ -1026,6 +1102,15 @@ async function runImportTests() {
       ok(r1.error && !r1.root, "importBackupText 对坏 JSON 返回 error 而非抛异常");
       const r2 = env.api.importBackupText(JSON.stringify({ projects: [] }));
       ok(/没有任何项目/.test(r2.error || ""), "空项目数组被判为损坏");
+      const dupProject = JSON.stringify({
+        projects: [
+          { id: "d", name: "甲", layouts: [{ id: "l", name: "L", inventory: [], placements: [], drafts: [], settings: {} }] },
+          { id: "d", name: "乙", layouts: [{ id: "l2", name: "L2", inventory: [], placements: [], drafts: [], settings: {} }] }
+        ]
+      });
+      const r3 = env.api.importBackupText(dupProject);
+      ok(/重复的项目 id/.test(r3.error || ""), "同步入口也拒绝重复项目 id 并说明原因");
+      ok(!r3.root, "重复项目 id 时不返回可用 root");
     }
 
     // 文件读取失败（如权限问题）

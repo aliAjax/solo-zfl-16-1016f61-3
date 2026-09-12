@@ -748,6 +748,39 @@ function validateBackupShape(source) {
       }
     }
   }
+
+  // id 唯一性：项目 id 必须全局唯一；版面 id 必须在所属项目内唯一。
+  // 否则下拉切换时 .find() 只会命中第一个同 id 对象，导致“导入成功却切不过去”。
+  const projectIds = new Map(); // id -> [项目名]
+  for (const project of data.projects) {
+    const id = String(project.id ?? "").trim();
+    if (!id) continue; // 缺失 id 会在清洗时重新生成，不影响导入
+    if (!projectIds.has(id)) projectIds.set(id, []);
+    projectIds.get(id).push(project.name || "未命名项目");
+  }
+  for (const [id, names] of projectIds) {
+    if (names.length > 1) {
+      return `备份中存在重复的项目 id「${id}」（${names
+        .map((name) => `项目「${name}」`)
+        .join("、")}），无法导入。`;
+    }
+  }
+  for (const project of data.projects) {
+    const layoutIds = new Map(); // id -> [版面名]
+    for (const layout of project.layouts) {
+      const id = String(layout.id ?? "").trim();
+      if (!id) continue;
+      if (!layoutIds.has(id)) layoutIds.set(id, []);
+      layoutIds.get(id).push(layout.name || "未命名版面");
+    }
+    for (const [id, names] of layoutIds) {
+      if (names.length > 1) {
+        return `项目「${project.name || "未命名项目"}」中存在重复的版面 id「${id}」（${names
+          .map((name) => `版面「${name}」`)
+          .join("、")}），无法导入。`;
+      }
+    }
+  }
   return null;
 }
 
